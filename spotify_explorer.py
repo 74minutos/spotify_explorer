@@ -1,6 +1,7 @@
-import streamlit as st
 import openai
 import requests
+import streamlit as st
+import json
 
 SPOTIFY_API_DOC = """
 La API de Spotify permite buscar y obtener información de artistas, álbumes, canciones, playlists, etc.
@@ -45,10 +46,16 @@ class SpotifyAPIExplorer:
             max_tokens=200,
             temperature=0
         )
-        import json
+        # Respuesta usando OpenAI v1.x
         response = completion.choices[0].message.content
+        # Normalizar comillas y parsear
         response = response.replace("'", '"')
-        api_call = json.loads(response)
+        try:
+            api_call = json.loads(response)
+        except json.JSONDecodeError:
+            st.error(f"Error interpretando la respuesta del LLM: {response}")
+            return None
+        # Ejecutar llamada real a Spotify API
         url = f"https://api.spotify.com{api_call['endpoint']}"
         headers = {'Authorization': f'Bearer {self.access_token}'}
         params = api_call.get('params', {})
@@ -70,7 +77,9 @@ if st.button("Buscar") and client_id and client_secret and openai_api_key and us
     with st.spinner("Consultando..."):
         try:
             result = explorer.run_query(user_query)
-            st.json(result)
+            if result:
+                st.json(result)
         except Exception as e:
             st.error(f"Error: {e}")
+
 
