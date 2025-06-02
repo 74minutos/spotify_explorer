@@ -46,7 +46,7 @@ class SpotifyAPIExplorer:
             temperature=0
         )
         import json
-        response = completion.choices[0].message['content']
+        response = completion.choices[0].message.content
         response = response.replace("'", '"')
         api_call = json.loads(response)
         url = f"https://api.spotify.com{api_call['endpoint']}"
