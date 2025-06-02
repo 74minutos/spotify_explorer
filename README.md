@@ -2,10 +2,6 @@
 
 Explora la API de Spotify usando lenguaje natural. Pregunta lo que quieras sobre artistas, canciones, álbumes o playlists, y el agente interpreta la consulta, consulta la API de Spotify y te muestra el resultado.
 
-## Demo
-
-![demo](demo.gif)
-
 ---
 
 ## ¿Qué hace este proyecto?

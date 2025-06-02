@@ -39,7 +39,7 @@ class SpotifyAPIExplorer:
             f"Consulta de usuario: '{user_query}'\n"
             "Output:"
         )
-        completion = openai.ChatCompletion.create(
+        completion = openai.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
