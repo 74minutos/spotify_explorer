@@ -217,12 +217,18 @@ class SpotifyAPIExplorer:
             # Llama al endpoint final con el id encontrado
             endpoint_final = api_call['endpoint'].replace('{id}', track_id).replace('track_id', track_id)
             url_final = f"https://api.spotify.com{endpoint_final}"
+            # Quita params 'id'/'track_id' si ya está en el endpoint
+            new_params = {
+                k: v for k, v in api_call.get('params', {}).items()
+                if str(v).lower() not in ['{id}', 'track_id'] and k not in ['id', 'track_id']
+            }
             resp2 = requests.request(
                 api_call['method'],
                 url_final,
                 headers=headers,
-                params={k: (track_id if v in ['{id}', 'track_id'] else v) for k, v in api_call.get('params', {}).items()}
+                params=new_params
             )
+
             resp2.raise_for_status()
             return resp2.json()
         else:
