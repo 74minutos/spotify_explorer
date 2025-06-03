@@ -16,6 +16,7 @@ Principales endpoints:
 - GET /v1/playlists/{id}/tracks: Tracks de una playlist
 - GET /v1/artists/{id}/top-tracks: Top canciones de un artista
 - GET /v1/audio-features/{id}: Características de audio de una canción
+- GET /v1/audio-analysis/{id}: Análisis de audio avanzado de una canción
 - GET /v1/recommendations: Recomendaciones musicales (seed_tracks, seed_artists)
 """
 
@@ -103,6 +104,13 @@ def get_audio_features(track_id, access_token):
     resp.raise_for_status()
     return resp.json()
 
+def get_audio_analysis(track_id, access_token):
+    url = f"https://api.spotify.com/v1/audio-analysis/{track_id}"
+    headers = {'Authorization': f'Bearer {access_token}'}
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
 def plot_audio_features(features):
     feature_keys = [
         "acousticness", "danceability", "energy", "instrumentalness",
@@ -148,14 +156,15 @@ class SpotifyAPIExplorer:
         resp.raise_for_status()
         return resp.json()['access_token']
 
-    def run_query(self, user_query):
+    def llm_call(self, user_query):
         openai.api_key = self.openai_api_key
         prompt = (
             f"{SPOTIFY_API_DOC}\n"
             "Eres un agente que recibe consultas de usuario y las traduce a llamadas HTTP a la API de Spotify. "
-            "Para cada consulta de usuario, responde en JSON con los campos: 'endpoint', 'method', 'params'. "
-            "Ejemplo de output:\n"
-            "{'endpoint': '/v1/search', 'method': 'GET', 'params': {'q': 'Beatles', 'type': 'artist'}}\n\n"
+            "Devuelve solo la última llamada necesaria para responder la consulta. "
+            "Si la llamada requiere un ID, devuelve la llamada usando el endpoint y los parámetros con '{id}'. "
+            "No des explicaciones. Ejemplo:\n"
+            "{\"endpoint\": \"/v1/search\", \"method\": \"GET\", \"params\": {\"q\": \"Beatles\", \"type\": \"artist\"}}\n"
             f"Consulta de usuario: '{user_query}'\n"
             "Output:"
         )
@@ -165,24 +174,68 @@ class SpotifyAPIExplorer:
             max_tokens=200,
             temperature=0
         )
-        response = completion.choices[0].message.content
-        response = clean_llm_json(response.replace("'", '"'))
+        return completion.choices[0].message.content
+
+    def pipeline_query(self, user_query):
+        # 1. Llama al LLM y parsea la respuesta
+        response = self.llm_call(user_query)
         try:
-            api_call = json.loads(response)
-        except json.JSONDecodeError:
+            api_call = json.loads(clean_llm_json(response.replace("'", '"')))
+        except Exception:
             st.error(f"Error interpretando la respuesta del LLM: {response}")
             return None
 
-        url = f"https://api.spotify.com{api_call['endpoint']}"
-        headers = {'Authorization': f'Bearer {self.access_token}'}
-        params = api_call.get('params', {})
-        resp = requests.request(api_call['method'], url, headers=headers, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        # 2. ¿Es una llamada con {id} o "track_id"? Si sí, lanza la búsqueda y la segunda llamada
+        if (
+            (api_call['endpoint'].endswith('/{id}') or api_call['endpoint'].endswith('/track_id'))
+            or any(str(v).lower() in ['{id}', 'track_id'] for v in api_call.get("params", {}).values())
+        ):
+            # Extrae el nombre de la canción o artista del user_query usando comillas o split
+            import re
+            quoted = re.findall(r'"([^"]+)"', user_query)
+            if quoted:
+                search_query = quoted[0]
+            else:
+                search_query = user_query
+            search_params = {
+                "endpoint": "/v1/search",
+                "method": "GET",
+                "params": {"q": search_query, "type": "track"}
+            }
+            url = f"https://api.spotify.com{search_params['endpoint']}"
+            headers = {'Authorization': f'Bearer {self.access_token}'}
+            resp = requests.request(
+                search_params['method'], url, headers=headers, params=search_params['params']
+            )
+            resp.raise_for_status()
+            tracks = resp.json().get('tracks', {}).get('items', [])
+            if not tracks:
+                st.error("No se encontró la canción.")
+                return None
+            track_id = tracks[0]['id']
+
+            # Llama al endpoint final con el id encontrado
+            endpoint_final = api_call['endpoint'].replace('{id}', track_id).replace('track_id', track_id)
+            url_final = f"https://api.spotify.com{endpoint_final}"
+            resp2 = requests.request(
+                api_call['method'],
+                url_final,
+                headers=headers,
+                params={k: (track_id if v in ['{id}', 'track_id'] else v) for k, v in api_call.get('params', {}).items()}
+            )
+            resp2.raise_for_status()
+            return resp2.json()
+        else:
+            # Llama normal
+            url = f"https://api.spotify.com{api_call['endpoint']}"
+            headers = {'Authorization': f'Bearer {self.access_token}'}
+            resp = requests.request(api_call['method'], url, headers=headers, params=api_call.get('params', {}))
+            resp.raise_for_status()
+            return resp.json()
 
 # --- Interfaz Streamlit ---
 
-st.title("Spotify API Explorer con LLM + Audio Features + Recomendaciones")
+st.title("Spotify API Explorer con LLM + Features + Pipeline")
 client_id = st.text_input("Spotify Client ID")
 client_secret = st.text_input("Spotify Client Secret", type="password")
 openai_api_key = st.text_input("OpenAI API Key", type="password")
@@ -192,8 +245,23 @@ if st.button("Buscar") and client_id and client_secret and openai_api_key and us
     explorer = SpotifyAPIExplorer(client_id, client_secret, openai_api_key)
     with st.spinner("Consultando..."):
         try:
-            result = explorer.run_query(user_query)
-            if result:
+            result = explorer.pipeline_query(user_query)
+            if not result:
+                st.warning("Sin resultados.")
+            # Para queries de features/análisis:
+            elif "loudness" in result or "danceability" in result or "acousticness" in result:
+                st.subheader("Audio Features")
+                features = result
+                fig = plot_audio_features(features)
+                st.pyplot(fig)
+                st.markdown("**Valores destacados:**")
+                for k in AUDIO_FEATURES_DESCRIPTIONS:
+                    if k in features:
+                        st.markdown(f"- **{k.capitalize()}**: {features[k]} ({AUDIO_FEATURES_DESCRIPTIONS[k]})")
+            elif "track" in result or "meta" in result:
+                st.json(result)
+            else:
+                # Para queries normales (álbumes, artistas, playlists, etc)
                 out = extract_spotify_items(result)
                 if out:
                     st.write(f"Resultados encontrados: {len(out)}")
@@ -205,33 +273,12 @@ if st.button("Buscar") and client_id and client_secret and openai_api_key and us
 [Ver en Spotify]({item.get('url', '')})""")
                         if item.get('image'):
                             st.image(item['image'], width=150)
-                        # Si es canción, permite análisis y recomendaciones
-                        if item.get("spotify_type") == "track":
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                if st.button(f"Ver análisis de audio", key=f"{item['id']}_audio_{idx}"):
-                                    with st.spinner("Cargando análisis de audio..."):
-                                        features = get_audio_features(item["id"], explorer.access_token)
-                                        st.subheader("Características de audio")
-                                        fig = plot_audio_features(features)
-                                        st.pyplot(fig)
-                                        st.markdown("**Explicación de métricas:**")
-                                        for k in AUDIO_FEATURES_DESCRIPTIONS:
-                                            st.markdown(f"- **{k.capitalize()}**: {AUDIO_FEATURES_DESCRIPTIONS[k]}")
-                            with col2:
-                                if st.button(f"Recomendaciones similares", key=f"{item['id']}_rec_{idx}"):
-                                    with st.spinner("Buscando recomendaciones..."):
-                                        recs = get_recommendations(seed_tracks=item["id"], access_token=explorer.access_token)
-                                        st.markdown("**Recomendaciones:**")
-                                        for rec in recs[:10]:
-                                            st.markdown(
-                                                f"- [{rec['name']}]({rec['external_urls']['spotify']}) - {', '.join(a['name'] for a in rec['artists'])}"
-                                            )
                         st.markdown("---")
                 else:
                     st.json(result)
         except Exception as e:
             st.error(f"Error: {e}")
+
 
 
 
