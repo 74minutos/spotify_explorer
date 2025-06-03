@@ -91,10 +91,23 @@ st.markdown(
 )
 st.markdown("---")
 
+# --- Configuración de credenciales desde secrets o manual ---
+
+def get_cred_or_secret(key, default=""):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return default
+
 with st.expander("Configura tus credenciales", expanded=True):
-    client_id = st.text_input("Spotify Client ID")
-    client_secret = st.text_input("Spotify Client Secret", type="password")
-    openai_api_key = st.text_input("OpenAI API Key", type="password")
+    default_client_id = get_cred_or_secret("SPOTIFY_CLIENT_ID")
+    default_client_secret = get_cred_or_secret("SPOTIFY_CLIENT_SECRET")
+    default_openai_api_key = get_cred_or_secret("OPENAI_API_KEY")
+
+    client_id = st.text_input("Spotify Client ID", value=default_client_id)
+    client_secret = st.text_input("Spotify Client Secret", value=default_client_secret, type="password")
+    openai_api_key = st.text_input("OpenAI API Key", value=default_openai_api_key, type="password")
+
 
 user_query = st.text_input("Pregunta sobre Spotify", "")
 
