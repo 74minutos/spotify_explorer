@@ -11,23 +11,64 @@ Principales endpoints:
 - GET /v1/tracks/{id}: Info de una canción
 - GET /v1/albums/{id}: Info de un álbum
 - GET /v1/playlists/{id}: Info de una playlist
+- GET /v1/playlists/{id}/tracks: Tracks de una playlist
 - GET /v1/artists/{id}/top-tracks: Top canciones de un artista
 """
 
 def clean_llm_json(text):
-    # Limpieza robusta del JSON devuelto por el LLM (quita backticks, markdown, etc.)
     text = text.strip()
-    # Quita todo antes de la primera llave {
     first_brace = text.find('{')
     if first_brace != -1:
         text = text[first_brace:]
-    # Quita todo después de la última llave }
     last_brace = text.rfind('}')
     if last_brace != -1:
         text = text[:last_brace+1]
-    # Borra backticks, markdown y saltos de línea sueltos
     text = text.replace("```json", "").replace("```", "").strip()
     return text
+
+def extract_spotify_items(result):
+    # Busca el primer nivel tipo 'albums', 'artists', 'tracks', 'playlists'
+    for key in ['albums', 'artists', 'tracks', 'playlists']:
+        if key in result:
+            items = result[key].get('items', [])
+            out = []
+            for i in items:
+                data = {}
+                if key == "albums":
+                    data = {
+                        "title": i.get("name"),
+                        "type": i.get("album_type"),
+                        "artist": ", ".join(a["name"] for a in i.get("artists", [])),
+                        "release": i.get("release_date", ""),
+                        "image": i.get("images", [{}])[0].get("url", ""),
+                        "url": i.get("external_urls", {}).get("spotify", "")
+                    }
+                elif key == "tracks":
+                    data = {
+                        "title": i.get("name"),
+                        "artist": ", ".join(a["name"] for a in i.get("artists", [])),
+                        "album": i.get("album", {}).get("name", ""),
+                        "image": i.get("album", {}).get("images", [{}])[0].get("url", ""),
+                        "url": i.get("external_urls", {}).get("spotify", "")
+                    }
+                elif key == "artists":
+                    data = {
+                        "title": i.get("name"),
+                        "type": i.get("type"),
+                        "image": i.get("images", [{}])[0].get("url", ""),
+                        "url": i.get("external_urls", {}).get("spotify", "")
+                    }
+                elif key == "playlists":
+                    data = {
+                        "title": i.get("name"),
+                        "type": "playlist",
+                        "image": i.get("images", [{}])[0].get("url", ""),
+                        "url": i.get("external_urls", {}).get("spotify", ""),
+                        "description": i.get("description", "")
+                    }
+                out.append(data)
+            return out
+    return None
 
 class SpotifyAPIExplorer:
     def __init__(self, client_id, client_secret, openai_api_key):
@@ -68,7 +109,7 @@ class SpotifyAPIExplorer:
         except json.JSONDecodeError:
             st.error(f"Error interpretando la respuesta del LLM: {response}")
             return None
-        # Ejecutar llamada real a Spotify API
+
         url = f"https://api.spotify.com{api_call['endpoint']}"
         headers = {'Authorization': f'Bearer {self.access_token}'}
         params = api_call.get('params', {})
@@ -90,9 +131,23 @@ if st.button("Buscar") and client_id and client_secret and openai_api_key and us
         try:
             result = explorer.run_query(user_query)
             if result:
-                st.json(result)
+                out = extract_spotify_items(result)
+                if out:
+                    st.write(f"Resultados encontrados: {len(out)}")
+                    for item in out:
+                        st.markdown(
+                            f"""**{item.get('title', '')}**  
+{item.get('artist', '') if 'artist' in item else ''}  
+{item.get('release', '') if 'release' in item else ''}  
+[Ver en Spotify]({item.get('url', '')})""")
+                        if item.get('image'):
+                            st.image(item['image'], width=150)
+                        st.markdown("---")
+                else:
+                    st.json(result)
         except Exception as e:
             st.error(f"Error: {e}")
+
 
 
 
