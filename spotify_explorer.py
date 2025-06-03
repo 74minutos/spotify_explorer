@@ -110,7 +110,7 @@ if user_query:
             params=api_call.get("params", {})
         )
         if "error" in result and result["error"]:
-            st.warning(result["msg"])
+            st.warning(result.get("msg", "Ha ocurrido un error inesperado con la API de Spotify."))
         elif "artists" in result:
             st.markdown(f"<div class='spotify-box'><span class='result-title'>Artistas:</span><br>"
                         + "<br>".join([f"🎤 <a href='{a['external_urls']['spotify']}' target='_blank'>{a['name']}</a>" for a in result["artists"]["items"]])
