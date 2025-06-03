@@ -2,7 +2,9 @@ import streamlit as st
 import openai
 import requests
 import json
+import matplotlib.pyplot as plt
 
+# --- Documentación corta para el LLM ---
 SPOTIFY_API_DOC = """
 La API de Spotify permite buscar y obtener información de artistas, álbumes, canciones, playlists, etc.
 Principales endpoints:
@@ -13,7 +15,24 @@ Principales endpoints:
 - GET /v1/playlists/{id}: Info de una playlist
 - GET /v1/playlists/{id}/tracks: Tracks de una playlist
 - GET /v1/artists/{id}/top-tracks: Top canciones de un artista
+- GET /v1/audio-features/{id}: Características de audio de una canción
+- GET /v1/recommendations: Recomendaciones musicales (seed_tracks, seed_artists)
 """
+
+AUDIO_FEATURES_DESCRIPTIONS = {
+    "acousticness": "Probabilidad de que la canción sea acústica (1 = acústica, 0 = no).",
+    "danceability": "Describe lo adecuada que es una canción para bailar (0-1).",
+    "energy": "Medida de intensidad y actividad (0-1).",
+    "instrumentalness": "Probabilidad de que la pista no contenga voces (1 = instrumental).",
+    "liveness": "Probabilidad de que la grabación sea en vivo (0-1).",
+    "loudness": "Volumen promedio de la pista en decibelios.",
+    "speechiness": "Detecta la presencia de palabras habladas.",
+    "valence": "Positividad/alegría de la canción (0 = triste, 1 = alegre).",
+    "tempo": "Velocidad estimada de la canción (BPM).",
+    "key": "Clave musical (0 = C, 1 = C♯/D♭, ..., 11 = B)",
+    "mode": "Modalidad: 1 = mayor, 0 = menor.",
+    "duration_ms": "Duración de la pista en milisegundos."
+}
 
 def clean_llm_json(text):
     text = text.strip()
@@ -27,7 +46,6 @@ def clean_llm_json(text):
     return text
 
 def extract_spotify_items(result):
-    # Busca el primer nivel tipo 'albums', 'artists', 'tracks', 'playlists'
     for key in ['albums', 'artists', 'tracks', 'playlists']:
         if key in result:
             items = result[key].get('items', [])
@@ -41,7 +59,9 @@ def extract_spotify_items(result):
                         "artist": ", ".join(a["name"] for a in i.get("artists", [])),
                         "release": i.get("release_date", ""),
                         "image": i.get("images", [{}])[0].get("url", ""),
-                        "url": i.get("external_urls", {}).get("spotify", "")
+                        "url": i.get("external_urls", {}).get("spotify", ""),
+                        "id": i.get("id"),
+                        "spotify_type": "album"
                     }
                 elif key == "tracks":
                     data = {
@@ -49,14 +69,18 @@ def extract_spotify_items(result):
                         "artist": ", ".join(a["name"] for a in i.get("artists", [])),
                         "album": i.get("album", {}).get("name", ""),
                         "image": i.get("album", {}).get("images", [{}])[0].get("url", ""),
-                        "url": i.get("external_urls", {}).get("spotify", "")
+                        "url": i.get("external_urls", {}).get("spotify", ""),
+                        "id": i.get("id"),
+                        "spotify_type": "track"
                     }
                 elif key == "artists":
                     data = {
                         "title": i.get("name"),
                         "type": i.get("type"),
                         "image": i.get("images", [{}])[0].get("url", ""),
-                        "url": i.get("external_urls", {}).get("spotify", "")
+                        "url": i.get("external_urls", {}).get("spotify", ""),
+                        "id": i.get("id"),
+                        "spotify_type": "artist"
                     }
                 elif key == "playlists":
                     data = {
@@ -64,11 +88,50 @@ def extract_spotify_items(result):
                         "type": "playlist",
                         "image": i.get("images", [{}])[0].get("url", ""),
                         "url": i.get("external_urls", {}).get("spotify", ""),
-                        "description": i.get("description", "")
+                        "description": i.get("description", ""),
+                        "id": i.get("id"),
+                        "spotify_type": "playlist"
                     }
                 out.append(data)
             return out
     return None
+
+def get_audio_features(track_id, access_token):
+    url = f"https://api.spotify.com/v1/audio-features/{track_id}"
+    headers = {'Authorization': f'Bearer {access_token}'}
+    resp = requests.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
+def plot_audio_features(features):
+    feature_keys = [
+        "acousticness", "danceability", "energy", "instrumentalness",
+        "liveness", "speechiness", "valence"
+    ]
+    values = [features[k] for k in feature_keys]
+    labels = [k.capitalize() for k in feature_keys]
+
+    fig, ax = plt.subplots(figsize=(6, 3))
+    bars = ax.barh(labels, values, color="#1DB954")
+    ax.set_xlim(0, 1)
+    ax.set_title("Spotify Audio Features")
+    ax.set_xlabel("Valor (0-1)")
+    for i, bar in enumerate(bars):
+        ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, f"{values[i]:.2f}", va="center")
+    plt.tight_layout()
+    return fig
+
+def get_recommendations(seed_tracks=None, seed_artists=None, access_token=None):
+    url = "https://api.spotify.com/v1/recommendations"
+    params = {}
+    if seed_tracks:
+        params["seed_tracks"] = seed_tracks
+    if seed_artists:
+        params["seed_artists"] = seed_artists
+    headers = {'Authorization': f'Bearer {access_token}'}
+    resp = requests.get(url, headers=headers, params=params)
+    resp.raise_for_status()
+    return resp.json().get("tracks", [])
 
 class SpotifyAPIExplorer:
     def __init__(self, client_id, client_secret, openai_api_key):
@@ -119,7 +182,7 @@ class SpotifyAPIExplorer:
 
 # --- Interfaz Streamlit ---
 
-st.title("Spotify API Explorer (con LLM)")
+st.title("Spotify API Explorer con LLM + Audio Features + Recomendaciones")
 client_id = st.text_input("Spotify Client ID")
 client_secret = st.text_input("Spotify Client Secret", type="password")
 openai_api_key = st.text_input("OpenAI API Key", type="password")
@@ -134,7 +197,7 @@ if st.button("Buscar") and client_id and client_secret and openai_api_key and us
                 out = extract_spotify_items(result)
                 if out:
                     st.write(f"Resultados encontrados: {len(out)}")
-                    for item in out:
+                    for idx, item in enumerate(out):
                         st.markdown(
                             f"""**{item.get('title', '')}**  
 {item.get('artist', '') if 'artist' in item else ''}  
@@ -142,6 +205,28 @@ if st.button("Buscar") and client_id and client_secret and openai_api_key and us
 [Ver en Spotify]({item.get('url', '')})""")
                         if item.get('image'):
                             st.image(item['image'], width=150)
+                        # Si es canción, permite análisis y recomendaciones
+                        if item.get("spotify_type") == "track":
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button(f"Ver análisis de audio", key=f"{item['id']}_audio_{idx}"):
+                                    with st.spinner("Cargando análisis de audio..."):
+                                        features = get_audio_features(item["id"], explorer.access_token)
+                                        st.subheader("Características de audio")
+                                        fig = plot_audio_features(features)
+                                        st.pyplot(fig)
+                                        st.markdown("**Explicación de métricas:**")
+                                        for k in AUDIO_FEATURES_DESCRIPTIONS:
+                                            st.markdown(f"- **{k.capitalize()}**: {AUDIO_FEATURES_DESCRIPTIONS[k]}")
+                            with col2:
+                                if st.button(f"Recomendaciones similares", key=f"{item['id']}_rec_{idx}"):
+                                    with st.spinner("Buscando recomendaciones..."):
+                                        recs = get_recommendations(seed_tracks=item["id"], access_token=explorer.access_token)
+                                        st.markdown("**Recomendaciones:**")
+                                        for rec in recs[:10]:
+                                            st.markdown(
+                                                f"- [{rec['name']}]({rec['external_urls']['spotify']}) - {', '.join(a['name'] for a in rec['artists'])}"
+                                            )
                         st.markdown("---")
                 else:
                     st.json(result)
