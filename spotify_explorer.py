@@ -1,139 +1,134 @@
 import streamlit as st
-import requests
 import openai
-import os
+import requests
+import json
 
-# Configuración
-SPOTIFY_CLIENT_ID = st.secrets["SPOTIFY_CLIENT_ID"] if "SPOTIFY_CLIENT_ID" in st.secrets else os.environ.get("SPOTIFY_CLIENT_ID")
-SPOTIFY_CLIENT_SECRET = st.secrets["SPOTIFY_CLIENT_SECRET"] if "SPOTIFY_CLIENT_SECRET" in st.secrets else os.environ.get("SPOTIFY_CLIENT_SECRET")
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"] if "OPENAI_API_KEY" in st.secrets else os.environ.get("OPENAI_API_KEY")
-openai.api_key = OPENAI_API_KEY
+SPOTIFY_API_DOC = """
+La API de Spotify permite buscar y obtener información de artistas, álbumes, canciones, playlists, etc.
+Principales endpoints:
+- GET /v1/search?q={query}&type={type}: Busca en Spotify (type: track, album, artist, playlist)
+- GET /v1/artists/{id}: Info de un artista
+- GET /v1/tracks/{id}: Info de una canción
+- GET /v1/albums/{id}: Info de un álbum
+- GET /v1/playlists/{id}: Info de una playlist
+- GET /v1/artists/{id}/top-tracks: Top canciones de un artista
+"""
 
-# --- Función para obtener el access token de Spotify ---
-def get_spotify_token():
-    auth_url = 'https://accounts.spotify.com/api/token'
-    auth_resp = requests.post(auth_url, {
-        'grant_type': 'client_credentials',
-        'client_id': SPOTIFY_CLIENT_ID,
-        'client_secret': SPOTIFY_CLIENT_SECRET,
-    })
-    auth_resp.raise_for_status()
-    return auth_resp.json()['access_token']
+def clean_llm_json(text):
+    text = text.strip()
+    first_brace = text.find('{')
+    if first_brace != -1:
+        text = text[first_brace:]
+    last_brace = text.rfind('}')
+    if last_brace != -1:
+        text = text[:last_brace+1]
+    text = text.replace("```json", "").replace("```", "").strip()
+    return text
 
-# --- Función para consultar la API de Spotify ---
-def spotify_api_call(endpoint, method="GET", params=None):
-    token = get_spotify_token()
-    headers = {"Authorization": f"Bearer {token}"}
-    url = "https://api.spotify.com/v1" + endpoint
+class SpotifyAPIExplorer:
+    def __init__(self, client_id, client_secret, openai_api_key):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.openai_api_key = openai_api_key
+        self.access_token = self.get_access_token()
 
-    # No usar endpoints de audio analysis/features
-    if any(forbidden in endpoint for forbidden in ["/audio-analysis", "/audio-features"]):
-        return {
-            "error": True,
-            "msg": (
-                "🚫 Lo siento, la API pública de Spotify ya no permite acceder al análisis avanzado de canciones "
-                "(como loudness, valence, danceability, etc.) por restricciones recientes. "
-                "Solo puedo ofrecerte información básica sobre canciones, discos, artistas y playlists."
-            ),
-        }
+    def get_access_token(self):
+        url = 'https://accounts.spotify.com/api/token'
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+        data = {'grant_type': 'client_credentials'}
+        resp = requests.post(url, headers=headers, data=data, auth=(self.client_id, self.client_secret))
+        resp.raise_for_status()
+        return resp.json()['access_token']
 
-    resp = requests.request(method, url, headers=headers, params=params)
-    if resp.status_code == 403:
-        return {
-            "error": True,
-            "msg": (
-                "🚫 No tienes acceso a este recurso de Spotify (puede estar restringido o no disponible en la API pública)."
-            ),
-        }
-    try:
-        return resp.json()
-    except Exception:
-        return {"error": True, "msg": "Error procesando la respuesta de Spotify."}
-
-# --- Función MCP con GPT-4o ---
-def generate_spotify_api_instructions(query):
-    prompt = (
-        "Eres un agente que traduce consultas humanas a llamadas de la API pública de Spotify Web (solo endpoints públicos: "
-        "search, artists, albums, tracks, playlists, recommendations). "
-        "Nunca uses audio-analysis ni audio-features, solo dilo si lo piden. "
-        "Devuelve SIEMPRE la respuesta en formato JSON así:\n"
-        '{ "endpoint": "/v1/...", "method": "GET", "params": {...} }\n'
-        "Consulta del usuario: " + query
-    )
-    completion = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=200,
-        temperature=0
-    )
-    # Extrae JSON de la respuesta del modelo
-    import re, json
-    response = completion.choices[0].message.content
-    match = re.search(r"\{[\s\S]+\}", response)
-    if match:
+    def run_query(self, user_query):
+        openai.api_key = self.openai_api_key
+        prompt = (
+            f"{SPOTIFY_API_DOC}\n"
+            "Eres un agente que recibe consultas de usuario y las traduce a llamadas HTTP a la API de Spotify. "
+            "Para cada consulta de usuario, responde en JSON con los campos: 'endpoint', 'method', 'params'. "
+            "Ejemplo de output:\n"
+            "{'endpoint': '/v1/search', 'method': 'GET', 'params': {'q': 'Beatles', 'type': 'artist'}}\n\n"
+            f"Consulta de usuario: '{user_query}'\n"
+            "Output:"
+        )
+        completion = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0
+        )
+        response = completion.choices[0].message.content
+        response = clean_llm_json(response.replace("'", '"'))
         try:
-            return json.loads(match.group())
-        except Exception:
+            api_call = json.loads(response)
+        except json.JSONDecodeError:
+            st.error(f"Error interpretando la respuesta del LLM: {response}")
             return None
-    return None
+        url = f"https://api.spotify.com{api_call['endpoint']}"
+        headers = {'Authorization': f'Bearer {self.access_token}'}
+        params = api_call.get('params', {})
+        resp = requests.request(api_call['method'], url, headers=headers, params=params)
+        resp.raise_for_status()
+        return resp.json()
 
-# --- Interfaz Streamlit ---
-st.set_page_config(page_title="Agente Spotify", page_icon="🎶", layout="centered")
+# --- Interfaz Streamlit Mejorada ---
+
+st.set_page_config(page_title="Spotify API Explorer", page_icon="🎧", layout="centered")
 st.markdown(
     """
     <style>
     .stApp {background-color: #181818;}
-    .big-title {font-size:2.2rem; color:#1DB954; text-align:center; font-weight: bold;}
-    .subtitle {color: #fff; font-size:1.1rem;}
-    .spotify-box {background: #232323; border-radius: 16px; padding: 18px; color: #eee;}
+    .main-card {background: #232323; border-radius: 16px; padding: 18px; color: #eee;}
     .result-title {color: #1DB954; font-weight: bold;}
+    a {color: #1DB954;}
     </style>
     """, unsafe_allow_html=True
 )
-st.markdown('<div class="big-title">Agente Conversacional Spotify 🎧</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Haz preguntas sobre artistas, discos, playlists, canciones, recomendaciones…</div>', unsafe_allow_html=True)
+st.markdown('<h1 style="color:#1DB954;text-align:center">Spotify API Explorer 🎧</h1>', unsafe_allow_html=True)
+st.markdown(
+    '<div style="text-align:center;color:#eee">Haz preguntas sobre artistas, discos, playlists, canciones o consulta cualquier dato de Spotify.</div>',
+    unsafe_allow_html=True
+)
+st.markdown("---")
 
-user_query = st.text_input("Escribe tu consulta sobre Spotify (ej: 'dame discos de Pink Floyd', 'playlist de los 80', 'recomiéndame canciones de rock', etc.):", "")
+with st.expander("Configura tus credenciales", expanded=True):
+    client_id = st.text_input("Spotify Client ID")
+    client_secret = st.text_input("Spotify Client Secret", type="password")
+    openai_api_key = st.text_input("OpenAI API Key", type="password")
 
-if user_query:
-    api_call = generate_spotify_api_instructions(user_query)
-    if not api_call:
-        st.error("No pude interpretar tu consulta. Prueba con otra formulación.")
-    elif "endpoint" in api_call and any(forbidden in api_call["endpoint"] for forbidden in ["/audio-analysis", "/audio-features"]):
-        st.warning(
-            "🚫 La API pública de Spotify ya no permite análisis avanzados de canciones. Pide otra cosa (busca artistas, discos, playlists, etc.)"
-        )
-    else:
-        result = spotify_api_call(
-            api_call["endpoint"],
-            method=api_call.get("method", "GET"),
-            params=api_call.get("params", {})
-        )
-        if "error" in result and result["error"]:
-            st.warning(result.get("msg", "Ha ocurrido un error inesperado con la API de Spotify."))
-        elif "artists" in result:
-            st.markdown(f"<div class='spotify-box'><span class='result-title'>Artistas:</span><br>"
-                        + "<br>".join([f"🎤 <a href='{a['external_urls']['spotify']}' target='_blank'>{a['name']}</a>" for a in result["artists"]["items"]])
-                        + "</div>", unsafe_allow_html=True)
-        elif "albums" in result:
-            st.markdown(f"<div class='spotify-box'><span class='result-title'>Álbumes:</span><br>"
-                        + "<br>".join([f"💿 <a href='{a['external_urls']['spotify']}' target='_blank'>{a['name']}</a> ({a['release_date']})" for a in result["albums"]["items"]])
-                        + "</div>", unsafe_allow_html=True)
-        elif "tracks" in result:
-            st.markdown(f"<div class='spotify-box'><span class='result-title'>Canciones:</span><br>"
-                        + "<br>".join([f"🎵 <a href='{t['external_urls']['spotify']}' target='_blank'>{t['name']}</a> - {', '.join([ar['name'] for ar in t['artists']])}" for t in result["tracks"]["items"]])
-                        + "</div>", unsafe_allow_html=True)
-        elif "playlists" in result:
-            st.markdown(f"<div class='spotify-box'><span class='result-title'>Playlists:</span><br>"
-                        + "<br>".join([f"📜 <a href='{p['external_urls']['spotify']}' target='_blank'>{p['name']}</a> ({p['description']})" for p in result["playlists"]["items"]])
-                        + "</div>", unsafe_allow_html=True)
-        elif "error" in result:
-            st.warning(result["msg"])
-        else:
-            # Resultado bruto (para endpoints que no has formateado)
-            st.json(result)
+user_query = st.text_input("Pregunta sobre Spotify", "")
 
-
+if st.button("Buscar") and client_id and client_secret and openai_api_key and user_query:
+    explorer = SpotifyAPIExplorer(client_id, client_secret, openai_api_key)
+    with st.spinner("Consultando..."):
+        try:
+            result = explorer.run_query(user_query)
+            if not result:
+                st.error("No se obtuvo resultado de la API.")
+            elif "error" in result and result["error"]:
+                st.warning(result.get("msg", "Ha ocurrido un error inesperado con la API de Spotify."))
+            elif "artists" in result:
+                st.markdown('<div class="main-card"><span class="result-title">Artistas encontrados:</span><br>' +
+                    "<br>".join([f"🎤 <a href='{a['external_urls']['spotify']}' target='_blank'>{a['name']}</a>" for a in result["artists"]["items"]]) +
+                    "</div>", unsafe_allow_html=True)
+            elif "albums" in result:
+                st.markdown('<div class="main-card"><span class="result-title">Álbumes encontrados:</span><br>' +
+                    "<br>".join([f"💿 <a href='{a['external_urls']['spotify']}' target='_blank'>{a['name']}</a> ({a['release_date']})" for a in result["albums"]["items"]]) +
+                    "</div>", unsafe_allow_html=True)
+            elif "tracks" in result:
+                st.markdown('<div class="main-card"><span class="result-title">Canciones encontradas:</span><br>' +
+                    "<br>".join([f"🎵 <a href='{t['external_urls']['spotify']}' target='_blank'>{t['name']}</a> - {', '.join([ar['name'] for ar in t['artists']])}" for t in result["tracks"]["items"]]) +
+                    "</div>", unsafe_allow_html=True)
+            elif "playlists" in result:
+                st.markdown('<div class="main-card"><span class="result-title">Playlists encontradas:</span><br>' +
+                    "<br>".join([f"📜 <a href='{p['external_urls']['spotify']}' target='_blank'>{p['name']}</a> ({p['description']})" for p in result["playlists"]["items"]]) +
+                    "</div>", unsafe_allow_html=True)
+            elif "audio_analysis" in result or "audio_features" in result:
+                st.warning("🚫 La API pública de Spotify ya no permite acceder al análisis avanzado de canciones (loudness, valence, danceability, etc). Solo puedo mostrar información básica sobre canciones, discos, artistas y playlists.")
+            else:
+                st.json(result)
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 
 
