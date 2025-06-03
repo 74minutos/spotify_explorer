@@ -1,6 +1,6 @@
+import streamlit as st
 import openai
 import requests
-import streamlit as st
 import json
 
 SPOTIFY_API_DOC = """
@@ -13,6 +13,21 @@ Principales endpoints:
 - GET /v1/playlists/{id}: Info de una playlist
 - GET /v1/artists/{id}/top-tracks: Top canciones de un artista
 """
+
+def clean_llm_json(text):
+    # Limpieza robusta del JSON devuelto por el LLM (quita backticks, markdown, etc.)
+    text = text.strip()
+    # Quita todo antes de la primera llave {
+    first_brace = text.find('{')
+    if first_brace != -1:
+        text = text[first_brace:]
+    # Quita todo después de la última llave }
+    last_brace = text.rfind('}')
+    if last_brace != -1:
+        text = text[:last_brace+1]
+    # Borra backticks, markdown y saltos de línea sueltos
+    text = text.replace("```json", "").replace("```", "").strip()
+    return text
 
 class SpotifyAPIExplorer:
     def __init__(self, client_id, client_secret, openai_api_key):
@@ -46,10 +61,8 @@ class SpotifyAPIExplorer:
             max_tokens=200,
             temperature=0
         )
-        # Respuesta usando OpenAI v1.x
         response = completion.choices[0].message.content
-        # Normalizar comillas y parsear
-        response = response.replace("'", '"')
+        response = clean_llm_json(response.replace("'", '"'))
         try:
             api_call = json.loads(response)
         except json.JSONDecodeError:
@@ -63,13 +76,12 @@ class SpotifyAPIExplorer:
         resp.raise_for_status()
         return resp.json()
 
-# --- Streamlit Interface ---
+# --- Interfaz Streamlit ---
 
 st.title("Spotify API Explorer (con LLM)")
 client_id = st.text_input("Spotify Client ID")
 client_secret = st.text_input("Spotify Client Secret", type="password")
 openai_api_key = st.text_input("OpenAI API Key", type="password")
-
 user_query = st.text_input("Pregunta sobre Spotify", "")
 
 if st.button("Buscar") and client_id and client_secret and openai_api_key and user_query:
@@ -81,5 +93,6 @@ if st.button("Buscar") and client_id and client_secret and openai_api_key and us
                 st.json(result)
         except Exception as e:
             st.error(f"Error: {e}")
+
 
 
